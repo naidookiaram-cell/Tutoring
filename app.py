@@ -82,8 +82,9 @@ DATA = Path(__file__).parent / "data"
 DATA.mkdir(exist_ok=True)
 
 SCHEMAS = {
-    "bookings": {"Submitted": "text", "Parent": "text", "Student": "text", "Level": "text",
-                 "Subject": "text", "Package": "text", "Notes": "text"},
+    "bookings": {"Submitted": "text", "Parent": "text", "Phone": "text", "Email": "text",
+                 "Student": "text", "Level": "text", "Subject": "text", "Package": "text",
+                 "Notes": "text"},
     "applications": {"Submitted": "text", "Name": "text", "Email": "text", "Phone": "text",
                      "University": "text", "Degree and year": "text", "Subjects": "text",
                      "Levels": "text", "Marks": "text", "Availability": "text", "Why KeyStone": "text"},
@@ -510,35 +511,36 @@ def page_faq():
 # ---------- Book ----------
 def page_book():
     st.subheader("Book a lesson")
-    st.write("Fill this in and we'll open WhatsApp with your message ready to send.")
-    with st.form("booking"):
+    st.write("Fill in your details and we'll get back to you to set up your first session.")
+    with st.form("booking", clear_on_submit=True):
         parent = st.text_input("Parent / guardian name")
+        c1, c2 = st.columns(2)
+        phone = c1.text_input("WhatsApp number")
+        email = c2.text_input("Email (optional)")
         student = st.text_input("Student name")
         b1, b2 = st.columns(2)
         grade = b1.selectbox("Level", LEVELS)
         subject = b2.selectbox("Subject", SUBJECT_CHOICES)
         package = st.selectbox("Package", list(PACK_SIZES) + list(SPECIALS) + ["Not sure yet"])
         notes = st.text_area("Anything we should know? (topics, exam dates, availability)")
-        submitted = st.form_submit_button("Create my message")
+        submitted = st.form_submit_button("Book now", type="primary")
 
     if submitted:
-        if not parent.strip() or not student.strip():
-            st.error("Please add the parent and student names.")
+        if not parent.strip() or not student.strip() or not phone.strip():
+            st.error("Please add your name, your WhatsApp number and the student's name.")
         else:
             append("bookings", {
                 "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Parent": parent,
-                "Student": student, "Level": grade, "Subject": subject,
-                "Package": package, "Notes": notes,
+                "Phone": phone, "Email": email, "Student": student, "Level": grade,
+                "Subject": subject, "Package": package, "Notes": notes,
             })
-            msg = (
-                f"Hi KeyStone! I'm {parent} and I'd like to book tutoring for {student}.\n"
-                f"Level: {grade}\nSubject: {subject}\nPackage: {package}"
-                + (f"\nNotes: {notes}" if notes else "")
+            st.success(
+                f"Thank you, {parent.strip().split()[0]}! We've received your booking for "
+                f"{student.strip()} and will be in touch on WhatsApp soon."
             )
-            st.success("Your message is ready!")
-            st.code(msg, language=None)
-            st.link_button("Send on WhatsApp", f"https://wa.me/{WHATSAPP}?text={quote(msg)}", type="primary")
-            st.caption(f"Prefer email? Send it to {EMAIL}.")
+            st.balloons()
+    st.caption(f"Questions first? WhatsApp us on {PHONE_DISPLAY} or email {EMAIL}.")
+
 
 # ---------- Join our team ----------
 def page_join():
