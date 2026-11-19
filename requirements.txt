@@ -1,1 +1,3 @@
 streamlit>=1.60
+gspread>=6.0
+google-auth>=2.20

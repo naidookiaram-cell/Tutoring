@@ -3,8 +3,9 @@
 Run it with:   streamlit run app.py   (or double-click "Start KeyStone Site")
 
 Everything the site saves (bookings, tutor applications, packages, reviews,
-tutor profiles) lives in the "data" folder next to this file as CSV files,
-so you can also open them in Excel.
+tutor profiles) goes to your Google Sheet when SHEET_URL and
+[gcp_service_account] are set in the app's secrets. Without them (e.g. on
+your laptop) it falls back to CSV files in the "data" folder.
 """
 from datetime import datetime
 from pathlib import Path
@@ -96,11 +97,61 @@ SCHEMAS = {
 }
 
 
-def load(name: str) -> pd.DataFrame:
-    """Read a CSV from the data folder with tidy column types."""
-    schema = SCHEMAS[name]
+# ---------- Where data is stored ----------
+# Online (Streamlit Cloud): a Google Sheet, one tab per table. Needs SHEET_URL and
+# [gcp_service_account] in the app's secrets.
+# On your laptop without those secrets: CSV files in the "data" folder.
+def _secret(key):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return None
+
+
+USE_SHEETS = bool(_secret("SHEET_URL") and _secret("gcp_service_account"))
+
+
+@st.cache_resource(show_spinner=False)
+def _spreadsheet():
+    import gspread
+    from google.oauth2.service_account import Credentials
+
+    creds = Credentials.from_service_account_info(
+        dict(st.secrets["gcp_service_account"]),
+        scopes=["https://www.googleapis.com/auth/spreadsheets"],
+    )
+    return gspread.authorize(creds).open_by_url(st.secrets["SHEET_URL"])
+
+
+def _worksheet(name: str):
+    import gspread
+
+    book = _spreadsheet()
+    try:
+        return book.worksheet(name)
+    except gspread.WorksheetNotFound:
+        ws = book.add_worksheet(title=name, rows=200, cols=len(SCHEMAS[name]))
+        ws.update([list(SCHEMAS[name])], "A1", value_input_option="RAW")
+        return ws
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _read_raw(name: str) -> pd.DataFrame:
+    if USE_SHEETS:
+        values = _worksheet(name).get_all_values()
+        if not values:
+            return pd.DataFrame()
+        header, rows = values[0], values[1:]
+        rows = [r + [""] * (len(header) - len(r)) for r in rows if any(c.strip() for c in r)]
+        return pd.DataFrame(rows, columns=header)
     path = DATA / f"{name}.csv"
-    df = pd.read_csv(path, dtype=str, keep_default_na=False) if path.exists() else pd.DataFrame()
+    return pd.read_csv(path, dtype=str, keep_default_na=False) if path.exists() else pd.DataFrame()
+
+
+def load(name: str) -> pd.DataFrame:
+    """Read a table with tidy column types."""
+    schema = SCHEMAS[name]
+    df = _read_raw(name).copy()
     for col, kind in schema.items():
         if col not in df:
             df[col] = ""
@@ -110,31 +161,64 @@ def load(name: str) -> pd.DataFrame:
             df[col] = df[col].map(lambda v: str(v).strip().lower() in ("true", "1", "yes")).astype(bool)
         else:
             df[col] = df[col].fillna("").astype(str)
-    return df[list(schema)]
+    return df[list(schema)].reset_index(drop=True)
+
+
+def _cell(value, kind):
+    """Plain Python values for Google Sheets (stored as-is, never run as formulas)."""
+    if kind == "int":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
+    if kind == "bool":
+        return bool(value) if not isinstance(value, str) else value.strip().lower() in ("true", "1", "yes")
+    return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value)
+
+
+def _rows(name: str, df: pd.DataFrame) -> list:
+    schema = SCHEMAS[name]
+    return [[_cell(rec.get(c), k) for c, k in schema.items()] for rec in df.to_dict("records")]
 
 
 def save(name: str, df: pd.DataFrame) -> None:
-    df.to_csv(DATA / f"{name}.csv", index=False)
+    if USE_SHEETS:
+        ws = _worksheet(name)
+        ws.clear()
+        ws.update([list(SCHEMAS[name])] + _rows(name, df), "A1", value_input_option="RAW")
+    else:
+        df.to_csv(DATA / f"{name}.csv", index=False)
+    _read_raw.clear()
 
 
 def append(name: str, row: dict) -> None:
-    df = load(name)
-    save(name, pd.concat([df, pd.DataFrame([row])], ignore_index=True))
+    if USE_SHEETS:
+        ws = _worksheet(name)
+        if ws.row_values(1) != list(SCHEMAS[name]):
+            # Header missing or out of date: rewrite the tab with the right columns.
+            save(name, pd.concat([load(name), pd.DataFrame([row])], ignore_index=True))
+            return
+        ws.append_rows(_rows(name, pd.DataFrame([row])), value_input_option="RAW")
+        _read_raw.clear()
+    else:
+        save(name, pd.concat([load(name), pd.DataFrame([row])], ignore_index=True))
 
 
-# First run: start the tutor list with Palesa so the page isn't empty
-if not (DATA / "tutors.csv").exists():
+# First run on a laptop: start the tutor list with Palesa so the page isn't empty
+if not USE_SHEETS and not (DATA / "tutors.csv").exists():
     save("tutors", pd.DataFrame([{
         "Name": "Palesa", "University": "", "Degree": "", "Subjects": "",
         "Grades": "", "Fun fact": "", "Show": True,
     }]))
 
 
-def admin_password() -> str:
+def admin_password() -> str | None:
+    """The admin password comes ONLY from Streamlit secrets. No secret = admin stays locked."""
     try:
-        return st.secrets["ADMIN_PASSWORD"]
+        pw = str(st.secrets["ADMIN_PASSWORD"]).strip()
+        return pw or None
     except Exception:
-        return "keystone"
+        return None
 
 
 def rand(n: int) -> str:
@@ -540,7 +624,9 @@ def page_admin():
         with st.form("login"):
             pw = st.text_input("Password", type="password")
             if st.form_submit_button("Log in"):
-                if pw == admin_password():
+                if admin_password() is None:
+                    st.error("Admin is locked: no ADMIN_PASSWORD has been set in the app's secrets.")
+                elif pw == admin_password():
                     st.session_state["admin"] = True
                     st.rerun()
                 else:
