@@ -52,6 +52,7 @@ SPECIALS = {
         "sessions": "6 sessions",
         "price": "from R2 100",
         "detail": "Gr 10-11 R2 100 · Matric R2 400 · Uni R2 700",
+        "totals": {"Grade 10-11": 2100, "Matric (Gr 12)": 2400, "First-year uni": 2700},
     },
     "NBT Prep": {
         "for": "Matrics applying to university",
@@ -59,6 +60,7 @@ SPECIALS = {
         "sessions": "4 sessions",
         "price": "R1 800",
         "detail": "2 × AQL + 2 × MAT, one-on-one",
+        "totals": {"Grade 10-11": 1800, "Matric (Gr 12)": 1800},
     },
     "Holiday Catch-up": {
         "for": "Grades 1-12",
@@ -66,6 +68,7 @@ SPECIALS = {
         "sessions": "5 sessions",
         "price": "from R950",
         "detail": "Gr 1-7 R950 · Gr 8-9 R1 200 · Gr 10-11 R1 650 · Matric R1 875",
+        "totals": {"Primary (Gr 1-7)": 950, "Grade 8-9": 1200, "Grade 10-11": 1650, "Matric (Gr 12)": 1875},
     },
     "Varsity Head Start": {
         "for": "Matrics heading to university",
@@ -73,6 +76,7 @@ SPECIALS = {
         "sessions": "4 sessions",
         "price": "R1 800",
         "detail": "One-on-one, before lectures start",
+        "totals": {"Matric (Gr 12)": 1800, "First-year uni": 1800},
     },
 }
 
@@ -86,7 +90,7 @@ DATA.mkdir(exist_ok=True)
 SCHEMAS = {
     "bookings": {"Submitted": "text", "Parent": "text", "Phone": "text", "Email": "text",
                  "Student": "text", "Level": "text", "Subject": "text", "Package": "text",
-                 "Notes": "text"},
+                 "Total": "text", "Notes": "text"},
     "applications": {"Submitted": "text", "Name": "text", "Email": "text", "Phone": "text",
                      "University": "text", "Degree and year": "text", "Subjects": "text",
                      "Levels": "text", "Matric results": "text", "Uni transcript": "text",
@@ -291,6 +295,22 @@ def package_value(level: str, size: int) -> int:
     single, four, ten = PRICES.get(level, (0, 0, 0))
     per = ten if size >= 10 else four if size >= 4 else single
     return per * size
+
+
+def booking_total(level: str, package: str):
+    """(total in rand or None, short explanation) for a level + package choice."""
+    if package in PACK_SIZES:
+        size = PACK_SIZES[package]
+        total = package_value(level, size)
+        per = total // size
+        return total, ("1 lesson" if size == 1 else f"{size} lessons at {rand(per)} each")
+    if package in SPECIALS:
+        sp = SPECIALS[package]
+        total = sp.get("totals", {}).get(level)
+        if total:
+            return total, sp.get("sessions", "")
+        return None, f"{package} isn't usually offered for {level}. We'll chat about the best option."
+    return None, "No stress, we'll help you choose the right package."
 
 
 # ---------- Mascot (same character as the Instagram posts) ----------
@@ -673,18 +693,32 @@ def page_book():
     if done:
         st.success(done)
         st.balloons()
-    with st.form(f"booking_{st.session_state.setdefault('book_form_n', 0)}"):
-        parent = st.text_input("Parent / guardian name")
+
+    n = st.session_state.setdefault("book_form_n", 0)   # bumping n gives a fresh, empty form
+
+    def k(name):
+        return f"book{n}_{name}"
+
+    with st.container(border=True):
+        parent = st.text_input("Parent / guardian name", key=k("parent"))
         c1, c2 = st.columns(2)
-        phone = c1.text_input("WhatsApp number")
-        email = c2.text_input("Email (optional)")
-        student = st.text_input("Student name")
+        phone = c1.text_input("WhatsApp number", key=k("phone"))
+        email = c2.text_input("Email (optional)", key=k("email"))
+        student = st.text_input("Student name", key=k("student"))
         b1, b2 = st.columns(2)
-        grade = b1.selectbox("Level", LEVELS)
-        subject = b2.selectbox("Subject", SUBJECT_CHOICES)
-        package = st.selectbox("Package", list(PACK_SIZES) + list(SPECIALS) + ["Not sure yet"])
-        notes = st.text_area("Anything we should know? (topics, exam dates, availability)")
-        submitted = st.form_submit_button("Book now", type="primary")
+        grade = b1.selectbox("Level", LEVELS, key=k("level"))
+        subject = b2.selectbox("Subject", SUBJECT_CHOICES, key=k("subject"))
+        package = st.selectbox("Package", list(PACK_SIZES) + list(SPECIALS) + ["Not sure yet"], key=k("package"))
+
+        total, note = booking_total(grade, package)
+        st.markdown(
+            f'<div class="price" style="text-align:left"><div class="lv">Your total</div>'
+            f'<div class="big">{rand(total) if total else "To be confirmed"}</div>'
+            f'<div class="per">{note}</div></div>',
+            unsafe_allow_html=True,
+        )
+        notes = st.text_area("Anything we should know? (topics, exam dates, availability)", key=k("notes"))
+        submitted = st.button("Book now", type="primary", key=k("submit"))
 
     if submitted:
         if not parent.strip() or not student.strip() or not phone.strip():
@@ -693,9 +727,10 @@ def page_book():
             append("bookings", {
                 "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Parent": parent,
                 "Phone": phone, "Email": email, "Student": student, "Level": grade,
-                "Subject": subject, "Package": package, "Notes": notes,
+                "Subject": subject, "Package": package,
+                "Total": rand(total) if total else "To be confirmed", "Notes": notes,
             })
-            st.session_state["book_form_n"] += 1   # fresh, empty form
+            st.session_state["book_form_n"] += 1
             st.session_state["booked_ok"] = (
                 f"Thank you, {parent.strip().split()[0]}! We've received your booking for "
                 f"{student.strip()} and will be in touch on WhatsApp soon."
