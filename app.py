@@ -6,6 +6,8 @@ Everything the site saves (bookings, tutor applications, packages, reviews,
 tutor profiles) goes to your Google Sheet when SHEET_URL and
 [gcp_service_account] are set in the app's secrets. Without them (e.g. on
 your laptop) it falls back to CSV files in the "data" folder.
+Tutor transcripts go to Supabase Storage when SUPABASE_URL and SUPABASE_KEY
+are set, otherwise to data/uploads.
 """
 from datetime import datetime
 from pathlib import Path
@@ -47,29 +49,25 @@ SPECIALS = {
     "Exam Prep": {
         "for": "Grades 10-12 & first-year uni",
         "blurb": "A focused run-up to exams, so nothing on the paper is a surprise.",
-        "includes": ["Past papers worked through together", "Extra time on the topics they dread",
-                     "Exam technique and time management"],
+        "includes": ["Past papers", "Tricky topics", "Exam technique"],
         "price": None,
     },
     "NBT Prep": {
         "for": "Matrics applying to university",
         "blurb": "Get ready for the National Benchmark Tests many universities ask for.",
-        "includes": ["Academic & Quantitative Literacy (AQL)", "Mathematics (MAT)",
-                     "Timed practice under test conditions"],
+        "includes": ["AQL", "MAT", "Timed practice"],
         "price": None,
     },
     "Holiday Catch-up": {
         "for": "Grades 1-12",
         "blurb": "Use the school holidays to close last term's gaps or get ahead of next term.",
-        "includes": ["Recap of topics that didn't stick", "A preview of next term's work",
-                     "Holiday-friendly session times"],
+        "includes": ["Recap", "Next term preview", "Holiday hours"],
         "price": None,
     },
     "Varsity Head Start": {
         "for": "Matrics heading to university",
         "blurb": "Bridge the jump from school to first-year maths, science or accounting.",
-        "includes": ["First-year topics before lectures start", "Study habits for a uni workload",
-                     "Tips from tutors who've just done first year"],
+        "includes": ["First-year topics", "Study habits", "Insider tips"],
         "price": None,
     },
 }
@@ -87,7 +85,8 @@ SCHEMAS = {
                  "Notes": "text"},
     "applications": {"Submitted": "text", "Name": "text", "Email": "text", "Phone": "text",
                      "University": "text", "Degree and year": "text", "Subjects": "text",
-                     "Levels": "text", "Marks": "text", "Availability": "text", "Why KeyStone": "text"},
+                     "Levels": "text", "Matric results": "text", "Uni transcript": "text",
+                     "Availability": "text", "Why KeyStone": "text"},
     "packages": {"Start date": "text", "Student": "text", "Parent": "text", "Tutor": "text",
                   "Subject": "text", "Level": "text", "Package": "text", "Package size": "int",
                  "Price (R)": "int", "Lessons done": "int",
@@ -213,6 +212,64 @@ if not USE_SHEETS and not (DATA / "tutors.csv").exists():
     }]))
 
 
+
+# ---------- File storage (tutor transcripts) ----------
+# Online: a private Supabase Storage bucket. Needs SUPABASE_URL and SUPABASE_KEY
+# (the secret / service_role key) in the app's secrets. On your laptop without
+# them: files go to data/uploads.
+USE_SUPABASE = bool(_secret("SUPABASE_URL") and _secret("SUPABASE_KEY"))
+BUCKET = _secret("SUPABASE_BUCKET") or "transcripts"
+MAX_UPLOAD_MB = 10
+UPLOAD_TYPES = ["pdf", "jpg", "jpeg", "png"]
+
+
+def _sb_headers(extra=None):
+    key = str(st.secrets["SUPABASE_KEY"])
+    h = {"apikey": key, "Authorization": f"Bearer {key}"}
+    h.update(extra or {})
+    return h
+
+
+def _safe(text: str) -> str:
+    import re
+    return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()[:40] or "file"
+
+
+def store_file(uploaded, person: str, label: str) -> str:
+    """Save an uploaded file and return its storage path ('' if nothing uploaded)."""
+    if uploaded is None:
+        return ""
+    ext = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else "bin"
+    path = f"{datetime.now():%Y%m%d-%H%M%S}_{_safe(person)}_{label}.{ext}"
+    data = uploaded.getvalue()
+    if USE_SUPABASE:
+        import requests
+        url = f"{str(st.secrets['SUPABASE_URL']).rstrip('/')}/storage/v1/object/{BUCKET}/{path}"
+        r = requests.post(url, data=data, timeout=60, headers=_sb_headers(
+            {"Content-Type": uploaded.type or "application/octet-stream", "x-upsert": "false"}))
+        r.raise_for_status()
+    else:
+        folder = DATA / "uploads"
+        folder.mkdir(exist_ok=True)
+        (folder / path).write_bytes(data)
+    return path
+
+
+def file_link(path: str) -> str:
+    """A temporary (1 hour) link to view a stored file, for the admin page."""
+    if not path:
+        return ""
+    if USE_SUPABASE:
+        import requests
+        base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+        r = requests.post(f"{base}/storage/v1/object/sign/{BUCKET}/{path}", json={"expiresIn": 3600},
+                          headers=_sb_headers(), timeout=30)
+        if not r.ok:
+            return ""
+        signed = r.json().get("signedURL") or r.json().get("signedUrl") or ""
+        return f"{base}/storage/v1{signed}" if signed.startswith("/") else signed
+    return ""
+
 def admin_password() -> str | None:
     """The admin password comes ONLY from Streamlit secrets. No secret = admin stays locked."""
     try:
@@ -274,6 +331,25 @@ st.markdown(
       .quote { font-family: 'Caveat', cursive; font-size: 1.7rem; line-height: 1.15; }
       .stars { color: #D9705A; letter-spacing: 0.15em; }
       .result { background: #F6D97A; border: 3px solid #2A2622; border-radius: 18px; padding: 1.2rem 1.4rem; }
+      .tile { background: #FFFDF8; border: 3px solid #2A2622; border-radius: 18px; padding: 1.1rem 1rem; text-align: center; box-shadow: 6px 8px 0 rgba(42,38,34,0.12); height: 100%; margin-bottom: 0.9rem; }
+      .tile .ic { width: 56px; height: 56px; border-radius: 50%; background: #F6D97A; border: 3px solid #2A2622; display: flex; align-items: center; justify-content: center; margin: 0 auto 0.6rem; }
+      .tile .tt { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.15rem; line-height: 1.15; }
+      .tile .ts { font-size: 0.9rem; color: #6B635A; margin-top: 0.25rem; }
+      .chips { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.4rem 0 1rem; }
+      .chip { background: #FFFDF8; border: 2px solid #2A2622; border-radius: 999px; padding: 0.3rem 0.85rem; font-weight: 500; font-size: 0.95rem; }
+      .chip.y { background: #F6D97A; }
+      .steps { display: flex; gap: 0.8rem; flex-wrap: wrap; margin: 0.5rem 0 1rem; }
+      .stp { flex: 1 1 110px; text-align: center; }
+      .stp .n { width: 48px; height: 48px; border-radius: 50%; background: #2A2622; color: #F6D97A; font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.4rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 0.5rem; }
+      .stp .tt { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.1rem; }
+      .stp .ts { font-size: 0.88rem; color: #6B635A; }
+      .price { background: #FFFDF8; border: 3px solid #2A2622; border-radius: 18px; padding: 1rem; text-align: center; box-shadow: 6px 8px 0 rgba(42,38,34,0.12); margin-bottom: 0.9rem; }
+      .price .lv { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: #6B635A; }
+      .price .big { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 2.1rem; line-height: 1.1; margin: 0.3rem 0 0; }
+      .price .per { font-size: 0.8rem; color: #6B635A; margin-bottom: 0.5rem; }
+      .price .row { display: flex; justify-content: space-between; font-size: 0.85rem; border-top: 1px dashed #CFC6B8; padding-top: 0.3rem; margin-top: 0.3rem; }
+      .sub { font-size: 1.15rem; color: #2A2622; margin: 0 0 1rem; }
+      h3.sec { font-family: 'Fraunces', Georgia, serif; margin: 1.6rem 0 0.4rem; }
       .foot { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.08em; color: #6B635A; text-align: center; margin-top: 3rem; }
       @media (max-width: 640px) { .hero { font-size: 2.6rem; } }
     </style>
@@ -282,6 +358,60 @@ st.markdown(
 )
 
 st.markdown('<div class="kicker">KEYSTONE TUTORS</div>', unsafe_allow_html=True)
+
+
+
+# ---------- Small visual helpers ----------
+_ICON_PATHS = {
+    "person": '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4 4-6 8-6s8 2 8 6"/>',
+    "laptop": '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M1 20h22"/>',
+    "match": '<circle cx="8" cy="9" r="3"/><circle cx="16" cy="9" r="3"/><path d="M2 20c0-3 3-5 6-5M22 20c0-3-3-5-6-5"/>',
+    "star": '<path d="M12 3l2.8 5.7 6.2.9-4.5 4.4 1 6.2L12 17.3 6.5 20.2l1-6.2L3 9.6l6.2-.9z"/>',
+    "clock": '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    "wallet": '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14h2"/>',
+    "shield": '<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/>',
+    "chat": '<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>',
+    "briefcase": '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/>',
+    "target": '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    "search": '<circle cx="11" cy="11" r="7"/><path d="M21 21l-5-5"/>',
+    "book": '<path d="M4 5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2z"/><path d="M4 21a2 2 0 0 1 2-2h12"/>',
+}
+
+
+def icon(name: str) -> str:
+    return ('<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2A2622" '
+            'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+            f"{_ICON_PATHS[name]}</svg>")
+
+
+def tiles(items, per_row=3):
+    """Icon tiles: items = [(icon, title, short line), ...]"""
+    for start in range(0, len(items), per_row):
+        cols = st.columns(per_row)
+        for col, (ic, title, sub) in zip(cols, items[start:start + per_row]):
+            col.markdown(f'<div class="tile"><div class="ic">{icon(ic)}</div><div class="tt">{title}</div>'
+                         f'<div class="ts">{sub}</div></div>', unsafe_allow_html=True)
+
+
+def chips(words, highlight=()):
+    html = "".join(f'<span class="chip{" y" if w in highlight else ""}">{w}</span>' for w in words)
+    st.markdown(f'<div class="chips">{html}</div>', unsafe_allow_html=True)
+
+
+def steps(items):
+    html = "".join(f'<div class="stp"><div class="n">{i}</div><div class="tt">{t}</div><div class="ts">{d}</div></div>'
+                   for i, (t, d) in enumerate(items, 1))
+    st.markdown(f'<div class="steps">{html}</div>', unsafe_allow_html=True)
+
+
+def section(title):
+    st.markdown(f'<h3 class="sec">{title}</h3>', unsafe_allow_html=True)
+
+
+def go(label, page, primary=False, key=None):
+    if st.button(label, type="primary" if primary else "secondary", key=key or f"go_{label}",
+                 width="stretch"):
+        st.switch_page(page)
 
 
 # ---------- Home ----------
@@ -293,49 +423,39 @@ def page_home():
             '<div class="hand">run by students, for students</div>',
             unsafe_allow_html=True,
         )
+        chips(["One-on-one", "Online", "Gr 1 to first-year uni", "IEB & NSC"])
+        b1, b2 = st.columns(2)
+        with b1:
+            go("Book a lesson", P_BOOK, primary=True, key="home_book")
+        with b2:
+            go("See prices", P_PRICING, key="home_prices")
     with right:
         st.markdown(MASCOT, unsafe_allow_html=True)
 
-    st.write(
-        "Private one-on-one tutoring, online, for **Grades 1 to 12 and first-year uni**. "
-        "IEB and NSC. Our tutors are students who were in your shoes not so long ago, "
-        "so they explain things the way they wish someone had explained them."
-    )
-    c1, c2, c3 = st.columns(3)
-    for col, title, text in [
-        (c1, "One-on-one", "Every session is just your child and their tutor. No crowded classroom."),
-        (c2, "Online", "Learn from home, no driving across town in traffic."),
-        (c3, "Matched tutors", "We pair each student with a tutor who suits their subject and grade."),
-    ]:
-        col.markdown(f'<div class="card"><h4>{title}</h4>{text}</div>', unsafe_allow_html=True)
+    section("Why KeyStone")
+    tiles([
+        ("person", "One-on-one", "Just your child and their tutor"),
+        ("laptop", "Online", "Learn from home"),
+        ("match", "Matched tutors", "The right fit for each student"),
+    ])
 
-    st.subheader("Subjects we cover")
-    gcols = st.columns(len(SUBJECT_GROUPS))
-    for col, (group, subs) in zip(gcols, SUBJECT_GROUPS.items()):
-        col.markdown(f'<div class="card"><div class="meta">{group}</div>'
-                     + "".join(f"<div>{s}</div>" for s in subs) + "</div>", unsafe_allow_html=True)
+    section("Subjects")
+    chips(SUBJECTS)
 
-    st.markdown(
-        '<div class="result"><h4 style="margin:0 0 0.3rem;font-family:Fraunces,Georgia,serif">'
-        "Exams coming up? NBTs on the horizon?</h4>"
-        "Have a look at our <b>Special packages</b>: Exam Prep, NBT Prep, Holiday Catch-up "
-        "and Varsity Head Start.</div>",
-        unsafe_allow_html=True,
-    )
-    st.page_link(P_SPECIAL, label="See special packages", icon=":material/arrow_forward:")
-
-    st.markdown(
-        '<div class="card" style="margin-top:1rem"><div class="kicker" style="color:#D9705A">WE\'RE HIRING</div>'
-        '<h4>Are you a uni student who\'s good at explaining things?</h4>'
-        "Tutor with KeyStone, choose your own hours and earn while you study.</div>",
-        unsafe_allow_html=True,
-    )
-    st.page_link(P_JOIN, label="Find out more and apply", icon=":material/arrow_forward:")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown('<div class="tile"><div class="ic">' + icon("target") + '</div>'
+                    '<div class="tt">Exams or NBTs coming up?</div></div>', unsafe_allow_html=True)
+        go("Special packages", P_SPECIAL, key="home_special")
+    with c2:
+        st.markdown('<div class="tile"><div class="ic">' + icon("briefcase") + '</div>'
+                    '<div class="tt">Uni student? Tutor with us</div></div>', unsafe_allow_html=True)
+        go("Join the team", P_JOIN, key="home_join")
 
     reviews = load("reviews")
     reviews = reviews[reviews["Show"] & (reviews["Quote"].str.strip() != "")]
     if not reviews.empty:
-        st.subheader("What parents say")
+        section("What parents say")
         cols = st.columns(2)
         for i, (_, r) in enumerate(reviews.iterrows()):
             stars = "★" * max(0, min(5, int(r["Stars"])))
@@ -347,82 +467,88 @@ def page_home():
 
 # ---------- Our tutors ----------
 def page_tutors():
-    st.subheader("Our tutors")
-    st.write(
-        "KeyStone tutors are university students who were sitting the same exams not long ago, "
-        "so they remember exactly what made a topic finally click."
-    )
-    st.markdown("#### What we look for")
-    w1, w2 = st.columns(2)
-    for col, title, text in [
-        (w1, "Strong in their subjects", "Tutors only teach subjects they've done well in themselves."),
-        (w2, "Great at explaining", "Knowing the work isn't enough. They have to make it make sense."),
-        (w1, "Matched to your child", "We pair each student with a tutor who suits their subject, grade and style."),
-        (w2, "Managed by KeyStone", "We stay in the loop on every student, so you always have someone to talk to."),
-    ]:
-        col.markdown(f'<div class="card"><h4>{title}</h4>{text}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero" style="font-size:2.8rem">Real students.<br>'
+                '<span class="hl">Real marks.</span></div>', unsafe_allow_html=True)
+    st.markdown('<p class="sub">Uni students who remember what made it click.</p>', unsafe_allow_html=True)
+    tiles([
+        ("star", "Top of their class", "In the subjects they teach"),
+        ("chat", "Great explainers", "Patient, clear, relatable"),
+        ("match", "Matched to you", "Subject, grade and style"),
+        ("shield", "Managed by us", "We stay in the loop"),
+    ], per_row=2)
 
     tutors = load("tutors")
     tutors = tutors[tutors["Show"] & (tutors["Name"].str.strip() != "")]
-    if len(tutors) < MIN_TUTORS_TO_SHOW:
-        tutors = tutors.iloc[0:0]
-    else:
-        st.markdown("#### Meet the team")
-    cols = st.columns(2)
-    for i, (_, t) in enumerate(tutors.iterrows()):
-        study = " · ".join(x for x in [t["Degree"], t["University"]] if x.strip())
-        lines = [f"<h4>{t['Name']}</h4>"]
-        if study:
-            lines.append(f'<div class="meta">{study}</div>')
-        if t["Subjects"].strip():
-            lines.append(f"<p><b>Teaches:</b> {t['Subjects']}</p>")
-        if t["Grades"].strip():
-            lines.append(f"<p><b>Grades:</b> {t['Grades']}</p>")
-        if t["Fun fact"].strip():
-            lines.append(f'<div class="hand" style="font-size:1.5rem">{t["Fun fact"]}</div>')
-        cols[i % 2].markdown(f'<div class="card">{"".join(lines)}</div>', unsafe_allow_html=True)
+    if len(tutors) >= MIN_TUTORS_TO_SHOW:
+        section("Meet the team")
+        cols = st.columns(2)
+        for i, (_, t) in enumerate(tutors.iterrows()):
+            study = " · ".join(x for x in [t["Degree"], t["University"]] if x.strip())
+            lines = [f"<h4>{t['Name']}</h4>"]
+            if study:
+                lines.append(f'<div class="meta">{study}</div>')
+            if t["Subjects"].strip():
+                lines.append(f"<p>{t['Subjects']}</p>")
+            if t["Fun fact"].strip():
+                lines.append(f'<div class="hand" style="font-size:1.4rem">{t["Fun fact"]}</div>')
+            cols[i % 2].markdown(f'<div class="card">{"".join(lines)}</div>', unsafe_allow_html=True)
+    go("Book a lesson", P_BOOK, primary=True, key="tutors_book")
 
 # ---------- Pricing ----------
 def page_pricing():
-    st.subheader("Pricing")
-    st.write("Prices are **per session**. The bigger the pack, the less each lesson costs.")
-    st.table(pd.DataFrame(
-        {"Single": [rand(p[0]) for p in PRICES.values()],
-         "4-pack": [rand(p[1]) for p in PRICES.values()],
-         "10-pack": [rand(p[2]) for p in PRICES.values()]},
-        index=pd.Index(LEVELS, name="Level"),
-    ))
+    st.markdown('<div class="hero" style="font-size:2.8rem">Simple <span class="hl">pricing.</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">Per session. Bigger pack, better price.</p>', unsafe_allow_html=True)
+    short = {"Primary (Gr 1-7)": "Gr 1-7", "Grade 8-9": "Gr 8-9", "Grade 10-11": "Gr 10-11",
+             "Matric (Gr 12)": "Matric", "First-year uni": "Uni"}
+    cols = st.columns(len(PRICES))
+    for col, (level, (single, four, ten)) in zip(cols, PRICES.items()):
+        col.markdown(
+            f'<div class="price"><div class="lv">{short.get(level, level)}</div>'
+            f'<div class="big">{rand(ten)}</div><div class="per">with a 10-pack</div>'
+            f'<div class="row"><span>Single</span><b>{rand(single)}</b></div>'
+            f'<div class="row"><span>4-pack</span><b>{rand(four)}</b></div></div>',
+            unsafe_allow_html=True,
+        )
 
-    st.markdown("#### Quick quote")
+    section("Your total")
     q1, q2 = st.columns(2)
     level = q1.selectbox("Level", LEVELS, key="q_level")
     pack = q2.selectbox("Package", list(PACK_SIZES), key="q_pack")
     size = PACK_SIZES[pack]
     total = package_value(level, size)
-    st.metric("Package total", rand(total), f"{rand(total // size)} per session")
-    st.page_link(P_SPECIAL, label="Looking for exam or NBT prep? See special packages",
-                 icon=":material/arrow_forward:")
+    st.markdown(
+        f'<div class="price" style="text-align:left"><div class="lv">Package total</div>'
+        f'<div class="big">{rand(total)}</div><div class="per">{rand(total // size)} per session</div></div>',
+        unsafe_allow_html=True,
+    )
+    b1, b2 = st.columns(2)
+    with b1:
+        go("Book a lesson", P_BOOK, primary=True, key="price_book")
+    with b2:
+        go("Exam & NBT prep", P_SPECIAL, key="price_special")
 
 # ---------- Special packages ----------
 def page_special():
-    st.subheader("Special packages")
-    st.write("For the moments that matter most. Each one is planned around your child and their goal.")
+    st.markdown('<div class="hero" style="font-size:2.8rem">Special <span class="hl">packages.</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">For the moments that matter most.</p>', unsafe_allow_html=True)
     scols = st.columns(2)
     for i, (name, sp) in enumerate(SPECIALS.items()):
-        price = rand(sp["price"]) if sp.get("price") else "Ask us for a quote"
-        items = "".join(f"<li>{x}</li>" for x in sp["includes"])
+        price = rand(sp["price"]) if sp.get("price") else "Ask for a quote"
+        items = "".join(f'<span class="chip">{x}</span>' for x in sp["includes"])
         scols[i % 2].markdown(
             f'<div class="card"><div class="meta">{sp["for"]}</div><h4>{name}</h4>'
-            f'<p>{sp["blurb"]}</p><ul style="margin:0 0 0.6rem 1.1rem;padding:0">{items}</ul>'
-            f'<span class="hl" style="font-weight:700">{price}</span></div>',
+            f'<div class="chips">{items}</div><span class="chip y"><b>{price}</b></span></div>',
             unsafe_allow_html=True,
         )
-    st.page_link(P_BOOK, label="Interested? Book a lesson", icon=":material/arrow_forward:")
+    go("Book a lesson", P_BOOK, primary=True, key="special_book")
 
 # ---------- Which package? ----------
 def page_quiz():
-    st.subheader("Which package suits us?")
-    st.write("Answer three quick questions and we'll point you in the right direction.")
+    st.markdown('<div class="hero" style="font-size:2.6rem">Which package <span class="hl">fits?</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">3 quick questions.</p>', unsafe_allow_html=True)
     qa = st.selectbox("1. What level is your child in?", LEVELS, key="quiz_level")
     qb = st.radio(
         "2. When is their next big test or exam?",
@@ -464,23 +590,23 @@ def page_quiz():
         f'<h3 style="margin:0.2rem 0">{rec}</h3><p>{why}</p>{cost}</div>',
         unsafe_allow_html=True,
     )
-    st.page_link(P_BOOK, label="Ready? Book a lesson", icon=":material/arrow_forward:")
+    go("Book a lesson", P_BOOK, primary=True, key="quiz_book")
 
 # ---------- How it works ----------
 def page_how():
-    st.subheader("How it works")
-    for num, title, text in [
-        ("01", "Get in touch", "Send us a message on the Book a lesson page, or WhatsApp us directly."),
-        ("02", "Meet your tutor", "We match your child with a tutor and set up a group chat with you, the tutor and KeyStone."),
-        ("03", "Choose a package", "Pick a single lesson, a 4-pack or a 10-pack, whatever suits you."),
-        ("04", "Start learning", "Your tutor shares session times in the group, and you're off."),
-    ]:
-        st.markdown(f'<div class="card"><span class="step">{num}</span><h4>{title}</h4>{text}</div>',
-                    unsafe_allow_html=True)
+    st.markdown('<div class="hero" style="font-size:2.8rem">How it <span class="hl">works.</span></div>',
+                unsafe_allow_html=True)
+    steps([
+        ("Book", "Fill in a quick form"),
+        ("Get matched", "We pick the right tutor"),
+        ("Choose a pack", "Single, 4 or 10 lessons"),
+        ("Learn", "Online, your schedule"),
+    ])
+    go("Book a lesson", P_BOOK, primary=True, key="how_book")
 
 # ---------- FAQ ----------
 def page_faq():
-    st.subheader("Questions parents ask")
+    st.markdown('<div class="hero" style="font-size:2.8rem">Questions?</div>', unsafe_allow_html=True)
     faqs = [
         ("Are the lessons online or in person?",
          "Online, one-on-one. Your child learns from home with their own tutor."),
@@ -510,9 +636,14 @@ def page_faq():
 
 # ---------- Book ----------
 def page_book():
-    st.subheader("Book a lesson")
-    st.write("Fill in your details and we'll get back to you to set up your first session.")
-    with st.form("booking", clear_on_submit=True):
+    st.markdown('<div class="hero" style="font-size:2.8rem">Book a <span class="hl">lesson.</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">We\'ll WhatsApp you to set up the first session.</p>', unsafe_allow_html=True)
+    done = st.session_state.pop("booked_ok", None)
+    if done:
+        st.success(done)
+        st.balloons()
+    with st.form(f"booking_{st.session_state.setdefault('book_form_n', 0)}"):
         parent = st.text_input("Parent / guardian name")
         c1, c2 = st.columns(2)
         phone = c1.text_input("WhatsApp number")
@@ -534,11 +665,12 @@ def page_book():
                 "Phone": phone, "Email": email, "Student": student, "Level": grade,
                 "Subject": subject, "Package": package, "Notes": notes,
             })
-            st.success(
+            st.session_state["book_form_n"] += 1   # fresh, empty form
+            st.session_state["booked_ok"] = (
                 f"Thank you, {parent.strip().split()[0]}! We've received your booking for "
                 f"{student.strip()} and will be in touch on WhatsApp soon."
             )
-            st.balloons()
+            st.rerun()
     st.caption(f"Questions first? WhatsApp us on {PHONE_DISPLAY} or email {EMAIL}.")
 
 
@@ -546,53 +678,29 @@ def page_book():
 def page_join():
     st.markdown(
         '<div class="kicker" style="color:#D9705A">WE\'RE HIRING TUTORS</div>'
-        '<div class="hero" style="font-size:3rem">Earn while you study.<br>'
+        '<div class="hero" style="font-size:2.8rem">Earn while you study.<br>'
         '<span class="hl">Teach what you\'re good at.</span></div>',
         unsafe_allow_html=True,
     )
-    st.write(
-        "KeyStone was started by a student, for students. If you're at university and you're "
-        "good at explaining things, we'd love to have you on the team."
-    )
+    tiles([
+        ("wallet", "Bigger share", "Most of every session fee"),
+        ("search", "We find students", "No chasing parents"),
+        ("clock", "Your hours", "Fits your timetable"),
+        ("laptop", "100% online", "Teach from anywhere"),
+        ("shield", "No admin", "Bookings & payments sorted"),
+        ("briefcase", "CV boost", "Real teaching experience"),
+    ])
+    section("You'll fit in if you're")
+    chips(["At uni or college", "Strong in your subjects", "Patient", "Reliable"], highlight=())
+    section("How it works")
+    steps([("Apply", "5-minute form"), ("Chat", "We get to know you"), ("Get matched", "Your subjects & grades"),
+           ("Teach", "Online sessions"), ("Get paid", "After each package")])
 
-    st.markdown("#### Why tutor with KeyStone")
-    w1, w2 = st.columns(2)
-    for col, title, text in [
-        (w1, "You keep the bigger share", "You earn the majority of every session fee, not a small cut."),
-        (w2, "We find the students", "No advertising or chasing parents. We match students to you."),
-        (w1, "Work around your timetable", "You choose how many students you take and when you teach."),
-        (w2, "Online, from anywhere", "Teach from res, home or campus. All you need is a laptop and Wi-Fi."),
-        (w1, "We handle the admin", "Bookings, payments and parent questions go through KeyStone."),
-        (w2, "Great for your CV", "Real teaching and communication experience employers notice."),
-    ]:
-        col.markdown(f'<div class="card"><h4>{title}</h4>{text}</div>', unsafe_allow_html=True)
-
-    st.markdown("#### Who we're looking for")
-    st.markdown(
-        '<div class="card">'
-        "<p>✓ &nbsp;You're currently studying at a university or college</p>"
-        "<p>✓ &nbsp;You did well in the subjects you want to teach</p>"
-        "<p>✓ &nbsp;You're patient and can explain things in more than one way</p>"
-        "<p style='margin:0'>✓ &nbsp;You're reliable: you show up on time and reply to messages</p>"
-        "</div>",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("#### How it works")
-    steps = [
-        ("01", "Apply", "Fill in the form below. It takes about 5 minutes."),
-        ("02", "Chat with us", "We'll get in touch to get to know you and talk through how it works."),
-        ("03", "Get matched", "We pair you with students in your subjects and grades."),
-        ("04", "Teach & track", "Run your sessions online and fill in a simple timesheet per package."),
-        ("05", "Get paid", "You're paid once each package of lessons is complete."),
-    ]
-    scols = st.columns(len(steps))
-    for col, (num, title, text) in zip(scols, steps):
-        col.markdown(f'<div class="card"><span class="step">{num}</span><h4 style="font-size:1.05rem">'
-                     f"{title}</h4><small>{text}</small></div>", unsafe_allow_html=True)
-
-    st.markdown("#### Apply now")
-    with st.form("apply", clear_on_submit=True):
+    section("Apply now")
+    if st.session_state.pop("applied_ok", False):
+        st.success("Thanks for applying! We'll be in touch on WhatsApp or email.")
+        st.balloons()
+    with st.form(f"apply_{st.session_state.setdefault('apply_form_n', 0)}"):
         a1, a2 = st.columns(2)
         name = a1.text_input("Full name")
         phone = a2.text_input("WhatsApp number")
@@ -602,22 +710,52 @@ def page_join():
         degree = a4.text_input("Degree and year (e.g. BSc Eng, 3rd year)")
         subj = st.multiselect("Subjects you can tutor", SUBJECTS + ["Other"])
         lvls = st.multiselect("Levels you can tutor", LEVELS)
-        marks = st.text_area("Your marks in those subjects (matric or uni)")
+        st.markdown("**Upload your results** (PDF or photo, max 10 MB each)")
+        u1, u2 = st.columns(2)
+        matric_file = u1.file_uploader("Matric results", type=UPLOAD_TYPES,
+                                       help="Needed if you want to teach any school grade")
+        uni_file = u2.file_uploader("University transcript", type=UPLOAD_TYPES,
+                                    help="Needed if you want to teach first-year uni")
         avail = st.text_input("When are you usually free? (e.g. weekday evenings, Saturdays)")
         why = st.text_area("Why would you like to tutor with KeyStone?")
-        applied = st.form_submit_button("Send my application")
+        applied = st.form_submit_button("Send my application", type="primary")
 
     if applied:
+        school = any(l != "First-year uni" for l in lvls)
+        varsity = "First-year uni" in lvls
+        problems = []
         if not name.strip() or not (phone.strip() or email.strip()):
-            st.error("Please add your name and a way to contact you.")
+            problems.append("your name and a way to contact you")
+        if not lvls:
+            problems.append("the levels you can tutor")
+        if school and matric_file is None:
+            problems.append("your matric results (you chose school grades)")
+        if varsity and uni_file is None:
+            problems.append("your university transcript (you chose first-year uni)")
+        too_big = [f.name for f in (matric_file, uni_file) if f is not None and f.size > MAX_UPLOAD_MB * 1024 * 1024]
+        if problems:
+            st.error("Please add " + "; ".join(problems) + ".")
+        elif too_big:
+            st.error(f"{', '.join(too_big)} is over {MAX_UPLOAD_MB} MB. Please upload a smaller file or photo.")
         else:
-            append("applications", {
-                "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Name": name, "Email": email,
-                "Phone": phone, "University": uni, "Degree and year": degree,
-                "Subjects": ", ".join(subj), "Levels": ", ".join(lvls), "Marks": marks,
-                "Availability": avail, "Why KeyStone": why,
-            })
-            st.success("Thanks for applying! We'll be in touch on WhatsApp or email.")
+            try:
+                with st.spinner("Uploading your documents..."):
+                    matric_path = store_file(matric_file, name, "matric")
+                    uni_path = store_file(uni_file, name, "uni")
+            except Exception:
+                st.error("Sorry, your documents couldn't be uploaded just now. Please try again in a minute, "
+                         f"or WhatsApp us on {PHONE_DISPLAY}.")
+            else:
+                append("applications", {
+                    "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Name": name, "Email": email,
+                    "Phone": phone, "University": uni, "Degree and year": degree,
+                    "Subjects": ", ".join(subj), "Levels": ", ".join(lvls),
+                    "Matric results": matric_path, "Uni transcript": uni_path,
+                    "Availability": avail, "Why KeyStone": why,
+                })
+                st.session_state["apply_form_n"] += 1   # fresh, empty form
+                st.session_state["applied_ok"] = True
+                st.rerun()
 
 # ---------- Admin ----------
 def page_admin():
@@ -713,7 +851,18 @@ def page_admin():
         with a_ap:
             ap = load("applications")
             st.write(f"**{len(ap)}** tutor application(s), newest first.")
-            st.dataframe(ap.iloc[::-1], hide_index=True, width="stretch")
+            view = ap.iloc[::-1].copy()
+            link_cfg = {}
+            if USE_SUPABASE:
+                for col in ("Matric results", "Uni transcript"):
+                    view[col] = [file_link(p) for p in view[col]]
+                    link_cfg[col] = st.column_config.LinkColumn(display_text="Open")
+                st.caption("Document links work for 1 hour. Reopen this tab for fresh links.")
+            elif (DATA / "uploads").exists():
+                st.caption(f"Running locally: documents are saved in {DATA / 'uploads'}")
+            first = ["Submitted", "Name", "Phone", "Matric results", "Uni transcript"]
+            view = view[first + [c for c in view.columns if c not in first]]
+            st.dataframe(view, hide_index=True, width="stretch", column_config=link_cfg)
             if not ap.empty:
                 st.download_button("Download as CSV", ap.to_csv(index=False), "applications.csv", "text/csv")
 
