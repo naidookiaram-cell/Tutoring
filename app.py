@@ -99,7 +99,13 @@ SCHEMAS = {
                   "Subject": "text", "Level": "text", "Package": "text", "Package size": "int",
                  "Price (R)": "int", "Lessons done": "int",
                  "Client paid": "bool", "Tutor paid": "bool"},
-    "reviews": {"Quote": "text", "Who": "text", "Stars": "int", "Show": "bool"},
+    "reviews": {"Quote": "text", "Who": "text", "Stars": "int", "Show": "bool",
+                "Submitted": "text", "Name (private)": "text"},
+    "products": {"ID": "text", "Title": "text", "Subject": "text", "Grade": "text", "Price": "int",
+                 "Pages": "int", "Description": "text", "File": "text", "Previews": "text", "Show": "bool"},
+    "orders": {"Submitted": "text", "Order ref": "text", "Product ID": "text", "Product": "text",
+               "Amount": "int", "Name": "text", "Email": "text", "Phone": "text",
+               "Proof of payment": "text", "Status": "text"},
     "tutors": {"Name": "text", "University": "text", "Degree": "text", "Subjects": "text",
                "Grades": "text", "Fun fact": "text", "Show": "bool"},
 }
@@ -243,24 +249,45 @@ def _safe(text: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", text).strip("-").lower()[:40] or "file"
 
 
-def store_file(uploaded, person: str, label: str) -> str:
+def store_bytes(data: bytes, path: str, content_type: str = "application/octet-stream") -> str:
+    """Save raw bytes at `path` (e.g. 'workbooks/x.pdf') and return the path."""
+    if USE_SUPABASE:
+        import requests
+        url = f"{str(st.secrets['SUPABASE_URL']).rstrip('/')}/storage/v1/object/{BUCKET}/{path}"
+        r = requests.post(url, data=data, timeout=120, headers=_sb_headers(
+            {"Content-Type": content_type, "x-upsert": "true"}))
+        r.raise_for_status()
+    else:
+        target = DATA / "uploads" / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return path
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=200)
+def read_bytes(path: str) -> bytes:
+    """Fetch a stored file's bytes (used for previews and downloads)."""
+    if not path:
+        return b""
+    if USE_SUPABASE:
+        import requests
+        base = str(st.secrets["SUPABASE_URL"]).rstrip("/")
+        r = requests.get(f"{base}/storage/v1/object/{BUCKET}/{path}", headers=_sb_headers(), timeout=120)
+        r.raise_for_status()
+        return r.content
+    target = DATA / "uploads" / path
+    return target.read_bytes() if target.exists() else b""
+
+
+def store_file(uploaded, person: str, label: str, folder: str = "") -> str:
     """Save an uploaded file and return its storage path ('' if nothing uploaded)."""
     if uploaded is None:
         return ""
     ext = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else "bin"
     path = f"{datetime.now():%Y%m%d-%H%M%S}_{_safe(person)}_{label}.{ext}"
-    data = uploaded.getvalue()
-    if USE_SUPABASE:
-        import requests
-        url = f"{str(st.secrets['SUPABASE_URL']).rstrip('/')}/storage/v1/object/{BUCKET}/{path}"
-        r = requests.post(url, data=data, timeout=60, headers=_sb_headers(
-            {"Content-Type": uploaded.type or "application/octet-stream", "x-upsert": "false"}))
-        r.raise_for_status()
-    else:
-        folder = DATA / "uploads"
-        folder.mkdir(exist_ok=True)
-        (folder / path).write_bytes(data)
-    return path
+    if folder:
+        path = f"{folder}/{path}"
+    return store_bytes(uploaded.getvalue(), path, uploaded.type or "application/octet-stream")
 
 
 def file_link(path: str) -> str:
@@ -285,6 +312,50 @@ def admin_password() -> str | None:
         return pw or None
     except Exception:
         return None
+
+
+# ---------- Shop helpers ----------
+# Banking details come from the app's secrets (BANK_NAME, ACCOUNT_NAME, ACCOUNT_NUMBER,
+# BRANCH_CODE, ACCOUNT_TYPE) so they live in one place and are easy to change.
+def bank_details() -> dict:
+    keys = {"Bank": "BANK_NAME", "Account name": "ACCOUNT_NAME", "Account number": "ACCOUNT_NUMBER",
+            "Branch code": "BRANCH_CODE", "Account type": "ACCOUNT_TYPE"}
+    return {label: str(_secret(k)) for label, k in keys.items() if _secret(k)}
+
+
+def new_order_ref() -> str:
+    import secrets as _s
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"   # no 0/O/1/I mix-ups
+    return "KS-" + "".join(_s.choice(alphabet) for _ in range(5))
+
+
+def pdf_previews(pdf: bytes, pages: int = 3, zoom: float = 1.3):
+    """PNG images of the first few pages of a PDF, plus its total page count."""
+    import pymupdf as fitz
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    images = [doc[i].get_pixmap(matrix=fitz.Matrix(zoom, zoom)).tobytes("png")
+              for i in range(min(pages, len(doc)))]
+    return images, len(doc)
+
+
+def order_links(title: str, price: int):
+    """WhatsApp and email links with the order message already filled in."""
+    msg = f"Hi KeyStone! I'd like to order the {title} ({rand(price)}). Please send me the payment details."
+    wa = f"https://wa.me/{WHATSAPP}?text={quote(msg)}"
+    mail = f"mailto:{EMAIL}?subject={quote('Workbook order: ' + title)}&body={quote(msg)}"
+    return wa, mail
+
+
+def stamp_pdf(pdf: bytes, buyer: str, ref: str) -> bytes:
+    """Add a small 'Licensed to ...' line to the bottom of every page."""
+    import pymupdf as fitz
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    text = f"Licensed to {buyer} · Order {ref} · For personal use only. Not for sharing or resale."
+    for page in doc:
+        r = page.rect
+        page.insert_textbox(fitz.Rect(36, r.height - 26, r.width - 36, r.height - 8), text,
+                            fontsize=7.5, fontname="helv", color=(0.42, 0.39, 0.35), align=1)
+    return doc.tobytes(garbage=3, deflate=True)
 
 
 def rand(n: int) -> str:
@@ -387,6 +458,11 @@ st.markdown(
       .sp-price { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.2rem; }
       .sp-price .big { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.7rem; white-space: nowrap; }
       .card .per { font-size: 0.82rem; color: #6B635A; margin-top: 0.3rem; }
+      .bank { background: #FFFDF8; border: 3px dashed #2A2622; border-radius: 18px; padding: 1rem 1.2rem; margin: 0.5rem 0 1rem; }
+      .bank .r { display: flex; justify-content: space-between; gap: 1rem; padding: 0.25rem 0; border-bottom: 1px dashed #CFC6B8; }
+      .bank .r:last-child { border-bottom: 0; }
+      .bank .r b { font-family: 'Space Mono', monospace; }
+      .ref { display: inline-block; background: #F6D97A; border: 3px solid #2A2622; border-radius: 12px; padding: 0.3rem 0.9rem; font-family: 'Space Mono', monospace; font-weight: 700; font-size: 1.4rem; letter-spacing: 0.08em; }
       .sub { font-size: 1.15rem; color: #2A2622; margin: 0 0 1rem; }
       h3.sec { font-family: 'Fraunces', Georgia, serif; margin: 1.6rem 0 0.4rem; }
       .foot { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.08em; color: #6B635A; text-align: center; margin-top: 3rem; }
@@ -675,6 +751,9 @@ def page_faq():
          "Your tutor shares session times there."),
         ("What if we need to miss a session?",
          "Let your tutor know in the group chat as early as you can and they'll find a new time with you."),
+        ("Can I share a workbook I bought?",
+         "Workbooks are for the buyer's own use. Each copy is licensed to the person who bought it, "
+         "and their name and order number appear on every page."),
         ("Who are the tutors?",
          "University students who did well in the subjects they teach. Read more on the Our tutors page."),
         ("How do I book?",
@@ -822,6 +901,208 @@ def page_join():
                 st.session_state["applied_ok"] = True
                 st.rerun()
 
+# ---------- Shop ----------
+def page_shop():
+    st.markdown('<div class="hero" style="font-size:2.8rem">Workbooks & <span class="hl">study guides.</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">Written by tutors. Worked solutions explained like a lesson.</p>',
+                unsafe_allow_html=True)
+    products = load("products")
+    products = products[products["Show"] & (products["Title"].str.strip() != "")]
+    if products.empty:
+        st.info("Our first workbooks are on their way. Check back soon!")
+        return
+    steps([("Preview", "See the first 3 pages"), ("Pay by EFT", "Use your order reference"),
+           ("Upload proof", "Takes a minute"), ("Download", "Confirmed within 24 hours")])
+
+    for _, p in products.iterrows():
+        with st.container(border=True):
+            meta = " · ".join(x for x in [p["Grade"], p["Subject"]] if x.strip())
+            pages_txt = f" · {p['Pages']} pages" if p["Pages"] else ""
+            st.markdown(
+                f'<div class="meta">{meta}{pages_txt}</div><h3 style="margin:0.2rem 0">{p["Title"]}</h3>'
+                f'<p style="margin:0 0 0.4rem">{p["Description"]}</p>'
+                f'<span class="chip y"><b>{rand(int(p["Price"]))}</b></span>',
+                unsafe_allow_html=True,
+            )
+            previews = [x for x in p["Previews"].split("|") if x.strip()]
+            if previews:
+                with st.expander("Preview the first pages", expanded=True):
+                    cols = st.columns(len(previews))
+                    for col, path in zip(cols, previews):
+                        try:
+                            col.image(read_bytes(path), width="stretch")
+                        except Exception:
+                            col.caption("Preview unavailable")
+            wa, mail = order_links(p["Title"], int(p["Price"]))
+            b1, b2, b3 = st.columns(3)
+            if b1.button("Buy now (EFT)", key=f"buy_{p['ID']}", type="primary", width="stretch"):
+                st.session_state["checkout"] = p["ID"]
+                st.session_state.pop("order_ref", None)
+                st.switch_page(P_CHECKOUT)
+            b2.link_button("Order on WhatsApp", wa, width="stretch")
+            b3.link_button("Order by email", mail, width="stretch")
+
+    section("Made by KeyStone")
+    st.markdown(
+        '<div class="card"><p style="margin:0 0 0.6rem">Every workbook is written by our founder: a '
+        "UCT-trained mechanical engineer working at an engineering company, who has spent 5 years preparing "
+        "Grade 12 IEB &amp; NSC students in Maths, Physical Sciences and Accounting. The explanations are "
+        "the ones that worked in real lessons.</p>"
+        '<div class="chips" style="margin:0">'
+        '<span class="chip">Mechanical engineer (UCT)</span>'
+        '<span class="chip">Working in engineering</span>'
+        '<span class="chip">5 years tutoring Grade 12</span>'
+        '<span class="chip y">Payments confirmed within 24 hours</span></div></div>',
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Questions before you buy? WhatsApp {PHONE_DISPLAY} or email {EMAIL}.")
+
+
+def page_checkout():
+    products = load("products")
+    pid = st.session_state.get("checkout")
+    match = products[products["ID"] == pid] if pid else products.iloc[0:0]
+    if match.empty:
+        st.info("Pick a workbook first.")
+        go("Go to the shop", P_SHOP, primary=True, key="co_shop")
+        return
+    p = match.iloc[0]
+    ref = st.session_state.setdefault("order_ref", new_order_ref())
+
+    st.markdown('<div class="hero" style="font-size:2.6rem">Checkout</div>', unsafe_allow_html=True)
+    st.markdown(f'<p class="sub"><b>{p["Title"]}</b> · {rand(int(p["Price"]))}</p>', unsafe_allow_html=True)
+
+    wa, mail = order_links(p["Title"], int(p["Price"]))
+    st.caption("Prefer to chat first? Order on WhatsApp or by email and we'll help you directly.")
+    c1, c2 = st.columns(2)
+    c1.link_button("Order on WhatsApp", wa, width="stretch")
+    c2.link_button("Order by email", mail, width="stretch")
+
+    section("1. Pay by EFT")
+    bank = bank_details()
+    if bank:
+        rows = "".join(f'<div class="r"><span>{k}</span><b>{v}</b></div>' for k, v in bank.items())
+        rows += f'<div class="r"><span>Amount</span><b>{rand(int(p["Price"]))}</b></div>'
+        st.markdown(f'<div class="bank">{rows}</div>', unsafe_allow_html=True)
+    else:
+        st.warning(f"Banking details are being updated. Please WhatsApp us on {PHONE_DISPLAY} to pay.")
+    st.markdown(f'Use this as your payment reference: <span class="ref">{ref}</span>', unsafe_allow_html=True)
+    st.caption("Instant EFT shows up fastest. Normal EFTs can take 1-2 business days between banks. "
+               "We confirm payments within 24 hours of them reflecting.")
+
+    section("2. Upload your proof of payment")
+    n = st.session_state.setdefault("co_form_n", 0)
+    name = st.text_input("Your name", key=f"co{n}_name")
+    c1, c2 = st.columns(2)
+    email = c1.text_input("Email", key=f"co{n}_email", help="You'll use this to download your workbook")
+    phone = c2.text_input("WhatsApp number", key=f"co{n}_phone")
+    pop = st.file_uploader("Proof of payment (PDF or screenshot)", type=UPLOAD_TYPES, key=f"co{n}_pop")
+    if st.button("Submit proof of payment", type="primary", key=f"co{n}_go"):
+        if not name.strip() or "@" not in email or pop is None:
+            st.error("Please add your name, a valid email and your proof of payment.")
+        elif pop.size > MAX_UPLOAD_MB * 1024 * 1024:
+            st.error(f"That file is over {MAX_UPLOAD_MB} MB. A screenshot works fine.")
+        else:
+            try:
+                with st.spinner("Uploading..."):
+                    pop_path = store_file(pop, ref, "pop", folder="payments")
+            except Exception:
+                st.error(f"Sorry, the upload didn't work. Please try again, or WhatsApp us on {PHONE_DISPLAY}.")
+            else:
+                append("orders", {
+                    "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Order ref": ref,
+                    "Product ID": p["ID"], "Product": p["Title"], "Amount": int(p["Price"]),
+                    "Name": name, "Email": email.strip().lower(), "Phone": phone,
+                    "Proof of payment": pop_path, "Status": "Pending",
+                })
+                st.session_state["co_form_n"] = n + 1
+                st.session_state["order_done"] = ref
+                st.session_state.pop("order_ref", None)
+                st.session_state.pop("checkout", None)
+                st.switch_page(P_DOWNLOADS)
+
+
+def page_downloads():
+    st.markdown('<div class="hero" style="font-size:2.6rem">My <span class="hl">downloads.</span></div>',
+                unsafe_allow_html=True)
+    done = st.session_state.pop("order_done", None)
+    if done:
+        st.success(f"Thank you! We've received your proof of payment for order {done}. "
+                   "We'll confirm it (usually within a day) and WhatsApp you when it's ready. "
+                   "Then come back here to download.")
+    st.markdown('<p class="sub">Enter your order reference and email to get your workbook.</p>',
+                unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    ref = c1.text_input("Order reference", value=done or "", placeholder="KS-XXXXX").strip().upper()
+    email = c2.text_input("Email").strip().lower()
+    if st.button("Find my order", type="primary"):
+        _read_raw.clear()   # always check the latest status
+        orders = load("orders")
+        mine = orders[(orders["Order ref"].str.upper() == ref) & (orders["Email"].str.lower() == email)]
+        if mine.empty:
+            st.error("We couldn't find that order. Check the reference and email, or WhatsApp us.")
+        else:
+            o = mine.iloc[-1]
+            if o["Status"] == "Approved":
+                prod = load("products")
+                prod = prod[prod["ID"] == o["Product ID"]]
+                if prod.empty or not prod.iloc[0]["File"]:
+                    st.error(f"Your payment is confirmed but the file is missing. Please WhatsApp us on {PHONE_DISPLAY}.")
+                else:
+                    try:
+                        data = read_bytes(prod.iloc[0]["File"])
+                    except Exception:
+                        data = b""
+                    if data:
+                        try:
+                            data = stamp_pdf(data, o["Name"].strip() or o["Email"], o["Order ref"])
+                        except Exception:
+                            pass   # if stamping ever fails, still give them their workbook
+                        st.success(f"Payment confirmed. Enjoy {o['Product']}!")
+                        st.download_button("Download your workbook", data,
+                                           file_name=f"{_safe(o['Product'])}.pdf", mime="application/pdf",
+                                           type="primary")
+                    else:
+                        st.error(f"Something went wrong fetching the file. Please WhatsApp us on {PHONE_DISPLAY}.")
+            elif o["Status"] == "Rejected":
+                st.error(f"We couldn't confirm this payment. Please WhatsApp us on {PHONE_DISPLAY}.")
+            else:
+                st.info("We're still checking your payment. We'll WhatsApp you as soon as it's confirmed.")
+
+# ---------- Leave a review (link you send to parents) ----------
+def page_review():
+    st.markdown('<div class="hero" style="font-size:2.6rem">How did we <span class="hl">do?</span></div>',
+                unsafe_allow_html=True)
+    st.markdown('<p class="sub">Your review helps other parents find us. Thank you for taking a minute!</p>',
+                unsafe_allow_html=True)
+    if st.session_state.pop("review_ok", False):
+        st.success("Thank you so much! We really appreciate it.")
+        st.balloons()
+        return
+    n = st.session_state.setdefault("review_form_n", 0)
+    name = st.text_input("Your name", key=f"rv{n}_name", help="Only we see this")
+    who = st.text_input("How should we show your name?", key=f"rv{n}_who",
+                        placeholder="e.g. Thandi M., parent of a Grade 11 learner")
+    stars = st.radio("Your rating", [5, 4, 3, 2, 1], horizontal=True, key=f"rv{n}_stars",
+                     format_func=lambda x: "★" * x)
+    quote = st.text_area("Your review", key=f"rv{n}_quote",
+                         placeholder="What changed for your child? What did you like?")
+    ok = st.checkbox("KeyStone may show this review on its website and social media", key=f"rv{n}_ok")
+    if st.button("Send my review", type="primary", key=f"rv{n}_go"):
+        if not name.strip() or len(quote.strip()) < 10:
+            st.error("Please add your name and a few words about your experience.")
+        elif not ok:
+            st.error("Please tick the box so we're allowed to share your review.")
+        else:
+            append("reviews", {"Quote": quote.strip(), "Who": who.strip() or name.strip().split()[0],
+                               "Stars": int(stars), "Show": False,
+                               "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                               "Name (private)": name.strip()})
+            st.session_state["review_form_n"] = n + 1
+            st.session_state["review_ok"] = True
+            st.rerun()
+
 # ---------- Admin ----------
 def page_admin():
     if not st.session_state.get("admin"):
@@ -843,8 +1124,8 @@ def page_admin():
             st.session_state["admin"] = False
             st.rerun()
 
-        a_pk, a_bk, a_ap, a_tu, a_rv = st.tabs(
-            ["Packages", "Bookings", "Applications", "Tutors", "Reviews"])
+        a_pk, a_bk, a_ap, a_or, a_sh, a_tu, a_rv = st.tabs(
+            ["Packages", "Bookings", "Applications", "Orders", "Shop", "Tutors", "Reviews"])
 
         with a_pk:
             st.write("Track each package here. Tick **Client paid** and **Tutor paid** as money moves.")
@@ -931,6 +1212,103 @@ def page_admin():
             if not ap.empty:
                 st.download_button("Download as CSV", ap.to_csv(index=False), "applications.csv", "text/csv")
 
+        with a_or:
+            orders = load("orders")
+            pending = int((orders["Status"] == "Pending").sum())
+            st.write(f"**{pending}** order(s) waiting for you to check payment.")
+            st.caption("Check the money is in your account (match the order reference), then set the "
+                       "Status to **Approved** and click Save. The buyer can then download on My downloads.")
+            view = orders.iloc[::-1].reset_index(drop=True)
+            link_cfg = {"Status": st.column_config.SelectboxColumn(options=["Pending", "Approved", "Rejected"]),
+                        "Amount": st.column_config.NumberColumn(format="R%d")}
+            if USE_SUPABASE:
+                view["Proof link"] = [file_link(x) for x in view["Proof of payment"]]
+                link_cfg["Proof link"] = st.column_config.LinkColumn(display_text="Open")
+            first = ["Order ref", "Status", "Name", "Amount", "Product"] + (["Proof link"] if USE_SUPABASE else [])
+            view = view[first + [c for c in view.columns if c not in first]]
+            edited = st.data_editor(view, hide_index=True, width="stretch", key="or_edit",
+                                    disabled=[c for c in view.columns if c != "Status"],
+                                    column_config=link_cfg)
+            if st.button("Save order statuses", type="primary"):
+                save("orders", edited.drop(columns=["Proof link"], errors="ignore").iloc[::-1])
+                st.success("Saved.")
+
+        with a_sh:
+            st.write("Add a workbook: upload the full PDF and the site makes a 3-page preview by itself.")
+            with st.form("add_product", clear_on_submit=True):
+                title = st.text_input("Title", placeholder="Gr 12 Electrodynamics Workbook")
+                c1, c2, c3 = st.columns(3)
+                subj = c1.selectbox("Subject", SUBJECTS + ["Other"])
+                grade = c2.selectbox("Grade", ["Grade 8", "Grade 9", "Grade 10", "Grade 11", "Grade 12",
+                                               "First-year uni"], index=4)
+                price = c3.number_input("Price (R)", min_value=0, step=10, value=120)
+                desc = st.text_area("Short description (one or two lines)")
+                pdf = st.file_uploader("Workbook PDF", type=["pdf"])
+                add = st.form_submit_button("Add workbook", type="primary")
+            if add:
+                if not title.strip() or pdf is None:
+                    st.error("Please add a title and the PDF.")
+                else:
+                    try:
+                        with st.spinner("Uploading and making previews..."):
+                            pid = _safe(title) + "-" + datetime.now().strftime("%H%M%S")
+                            data = pdf.getvalue()
+                            file_path = store_bytes(data, f"workbooks/{pid}.pdf", "application/pdf")
+                            imgs, n_pages = pdf_previews(data)
+                            prev = [store_bytes(img, f"previews/{pid}_{i + 1}.png", "image/png")
+                                    for i, img in enumerate(imgs)]
+                            append("products", {"ID": pid, "Title": title.strip(), "Subject": subj,
+                                                "Grade": grade, "Price": int(price), "Pages": n_pages,
+                                                "Description": desc.strip(), "File": file_path,
+                                                "Previews": "|".join(prev), "Show": True})
+                        st.success(f"Added {title}! It's now in the Shop.")
+                    except Exception as e:
+                        st.error(f"Couldn't add the workbook: {e}")
+            st.markdown("#### Make a stamped copy (for WhatsApp or email orders)")
+            st.caption("Once they've paid, pick the workbook, type their name and download a copy with "
+                       "'Licensed to ...' on every page, then send it to them.")
+            all_prods = load("products")
+            all_prods = all_prods[all_prods["Title"].str.strip() != ""]
+            if all_prods.empty:
+                st.info("Add a workbook first.")
+            else:
+                m1, m2 = st.columns(2)
+                pick = m1.selectbox("Workbook", all_prods["Title"].tolist(), key="manual_pick")
+                buyer = m2.text_input("Buyer's name", key="manual_buyer")
+                if st.button("Prepare stamped copy", key="manual_make"):
+                    if not buyer.strip():
+                        st.error("Type the buyer's name first.")
+                    else:
+                        row = all_prods[all_prods["Title"] == pick].iloc[0]
+                        ref = new_order_ref()
+                        try:
+                            stamped = stamp_pdf(read_bytes(row["File"]), buyer.strip(), ref)
+                        except Exception as e:
+                            st.error(f"Couldn't prepare the copy: {e}")
+                        else:
+                            append("orders", {
+                                "Submitted": datetime.now().strftime("%Y-%m-%d %H:%M"), "Order ref": ref,
+                                "Product ID": row["ID"], "Product": row["Title"], "Amount": int(row["Price"]),
+                                "Name": buyer.strip(), "Email": "", "Phone": "",
+                                "Proof of payment": "WhatsApp/email order", "Status": "Approved",
+                            })
+                            st.session_state["manual_copy"] = (stamped, f"{_safe(row['Title'])}_{_safe(buyer)}.pdf", ref)
+                if st.session_state.get("manual_copy"):
+                    data, fname, ref = st.session_state["manual_copy"]
+                    st.success(f"Ready! Order {ref} has been added to your Orders tab.")
+                    st.download_button("Download stamped copy", data, file_name=fname,
+                                       mime="application/pdf", type="primary", key="manual_dl")
+
+            st.markdown("#### Your workbooks")
+            st.caption("Change prices or untick Show to hide one, then click Save.")
+            prods = load("products")
+            pe = st.data_editor(prods, hide_index=True, width="stretch", key="sh_edit",
+                                disabled=["ID", "File", "Previews", "Pages"],
+                                column_config={"Price": st.column_config.NumberColumn(format="R%d")})
+            if st.button("Save workbooks", type="primary"):
+                save("products", pe)
+                st.success("Saved.")
+
         with a_tu:
             st.write("Edit tutor profiles. Untick **Show** to hide someone from the Our tutors page.")
             tu = st.data_editor(load("tutors"), num_rows="dynamic", width="stretch",
@@ -940,9 +1318,14 @@ def page_admin():
                 st.success("Saved. Refresh the page to see the changes.")
 
         with a_rv:
-            st.write("Paste in real messages from happy parents. Ticked ones show on the Home page.")
+            all_rv = load("reviews")
+            waiting = int((~all_rv["Show"] & (all_rv["Quote"].str.strip() != "")).sum())
+            st.write(f"**{waiting}** review(s) waiting for you. Tick **Show** on the ones you want on the "
+                     "Home page, then click Save.")
+            st.caption("Send parents this link to leave a review: your site address + /review "
+                       "(e.g. keystonetutoring.streamlit.app/review). You can also add reviews here yourself.")
             rv = st.data_editor(
-                load("reviews"), num_rows="dynamic", width="stretch", hide_index=True,
+                all_rv, num_rows="dynamic", width="stretch", hide_index=True,
                 key="rv_edit",
                 column_config={
                     "Quote": st.column_config.TextColumn(width="large"),
@@ -964,14 +1347,19 @@ P_HOW = st.Page(page_how, title="How it works", url_path="how-it-works")
 P_FAQ = st.Page(page_faq, title="FAQ", url_path="faq")
 P_BOOK = st.Page(page_book, title="Book a lesson", url_path="book")
 P_JOIN = st.Page(page_join, title="Tutor with us", url_path="join")
+P_SHOP = st.Page(page_shop, title="Workbooks", url_path="shop")
+P_DOWNLOADS = st.Page(page_downloads, title="My downloads", url_path="downloads")
+P_CHECKOUT = st.Page(page_checkout, title="Checkout", url_path="checkout", visibility="hidden")
 # Admin is hidden from the menu: open it at localhost:8600/admin
 P_ADMIN = st.Page(page_admin, title="Admin", url_path="admin", visibility="hidden")
+P_REVIEW = st.Page(page_review, title="Leave a review", url_path="review", visibility="hidden")
 
 nav = st.navigation(
     {
-        "": [P_HOME, P_ADMIN],
+        "": [P_HOME, P_ADMIN, P_CHECKOUT, P_REVIEW],
         "About us": [P_TUTORS, P_HOW, P_FAQ],
         "Packages & pricing": [P_PRICING, P_SPECIAL, P_QUIZ],
+        "Shop": [P_SHOP, P_DOWNLOADS],
         "Get started": [P_BOOK, P_JOIN],
     },
     position="top",
