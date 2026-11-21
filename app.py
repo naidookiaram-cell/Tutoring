@@ -43,32 +43,36 @@ SUBJECT_GROUPS = {
 SUBJECTS = [s for group in SUBJECT_GROUPS.values() for s in group]
 SUBJECT_CHOICES = SUBJECTS + ["Other (tell us below)"]
 
-# Special packages. Set "price" to a number (e.g. 3200) to show it on the site;
-# None shows "Ask us for a quote". Add, remove or rename freely.
+# Special packages. "price" is shown big on the card, "detail" underneath.
+# Use "price": None to show "Ask for a quote". Add, remove or rename freely.
 SPECIALS = {
     "Exam Prep": {
         "for": "Grades 10-12 & first-year uni",
-        "blurb": "A focused run-up to exams, so nothing on the paper is a surprise.",
         "includes": ["Past papers", "Tricky topics", "Exam technique"],
-        "price": None,
+        "sessions": "6 sessions",
+        "price": "from R2 100",
+        "detail": "Gr 10-11 R2 100 · Matric R2 400 · Uni R2 700",
     },
     "NBT Prep": {
         "for": "Matrics applying to university",
-        "blurb": "Get ready for the National Benchmark Tests many universities ask for.",
         "includes": ["AQL", "MAT", "Timed practice"],
-        "price": None,
+        "sessions": "4 sessions",
+        "price": "R1 800",
+        "detail": "2 × AQL + 2 × MAT, one-on-one",
     },
     "Holiday Catch-up": {
         "for": "Grades 1-12",
-        "blurb": "Use the school holidays to close last term's gaps or get ahead of next term.",
         "includes": ["Recap", "Next term preview", "Holiday hours"],
-        "price": None,
+        "sessions": "5 sessions",
+        "price": "from R950",
+        "detail": "Gr 1-7 R950 · Gr 8-9 R1 200 · Gr 10-11 R1 650 · Matric R1 875",
     },
     "Varsity Head Start": {
         "for": "Matrics heading to university",
-        "blurb": "Bridge the jump from school to first-year maths, science or accounting.",
         "includes": ["First-year topics", "Study habits", "Insider tips"],
-        "price": None,
+        "sessions": "4 sessions",
+        "price": "R1 800",
+        "detail": "One-on-one, before lectures start",
     },
 }
 
@@ -345,9 +349,24 @@ st.markdown(
       .stp .ts { font-size: 0.88rem; color: #6B635A; }
       .price { background: #FFFDF8; border: 3px solid #2A2622; border-radius: 18px; padding: 1rem; text-align: center; box-shadow: 6px 8px 0 rgba(42,38,34,0.12); margin-bottom: 0.9rem; }
       .price .lv { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase; color: #6B635A; }
-      .price .big { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 2.1rem; line-height: 1.1; margin: 0.3rem 0 0; }
+      .price .big { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.9rem; line-height: 1.1; margin: 0.3rem 0 0; white-space: nowrap; }
+      .price-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+      .price-grid .price { margin-bottom: 0; padding: 0.9rem 0.6rem; }
+      .sp-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+      .sp-grid .price { margin-bottom: 0; padding: 0.9rem 0.6rem; }
+      .sp-grid .price .big { font-size: 1.35rem; }
+      .price-grid .price .big { font-size: 1.65rem; }
+      @media (max-width: 760px) {
+        .price-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .price-grid .price:last-child { grid-column: span 2; }
+        .price-grid .price .big { font-size: 1.9rem; }
+        .sp-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
       .price .per { font-size: 0.8rem; color: #6B635A; margin-bottom: 0.5rem; }
-      .price .row { display: flex; justify-content: space-between; font-size: 0.85rem; border-top: 1px dashed #CFC6B8; padding-top: 0.3rem; margin-top: 0.3rem; }
+      .price .row { display: flex; justify-content: space-between; gap: 0.5rem; white-space: nowrap; font-size: 0.85rem; border-top: 1px dashed #CFC6B8; padding-top: 0.3rem; margin-top: 0.3rem; }
+      .sp-price { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; margin-top: 0.2rem; }
+      .sp-price .big { font-family: 'Fraunces', Georgia, serif; font-weight: 700; font-size: 1.7rem; white-space: nowrap; }
+      .card .per { font-size: 0.82rem; color: #6B635A; margin-top: 0.3rem; }
       .sub { font-size: 1.15rem; color: #2A2622; margin: 0 0 1rem; }
       h3.sec { font-family: 'Fraunces', Georgia, serif; margin: 1.6rem 0 0.4rem; }
       .foot { font-family: 'Space Mono', monospace; font-weight: 700; font-size: 0.8rem; letter-spacing: 0.08em; color: #6B635A; text-align: center; margin-top: 3rem; }
@@ -501,15 +520,22 @@ def page_pricing():
     st.markdown('<p class="sub">Per session. Bigger pack, better price.</p>', unsafe_allow_html=True)
     short = {"Primary (Gr 1-7)": "Gr 1-7", "Grade 8-9": "Gr 8-9", "Grade 10-11": "Gr 10-11",
              "Matric (Gr 12)": "Matric", "First-year uni": "Uni"}
-    cols = st.columns(len(PRICES))
-    for col, (level, (single, four, ten)) in zip(cols, PRICES.items()):
-        col.markdown(
-            f'<div class="price"><div class="lv">{short.get(level, level)}</div>'
-            f'<div class="big">{rand(ten)}</div><div class="per">with a 10-pack</div>'
-            f'<div class="row"><span>Single</span><b>{rand(single)}</b></div>'
-            f'<div class="row"><span>4-pack</span><b>{rand(four)}</b></div></div>',
-            unsafe_allow_html=True,
-        )
+    cards = "".join(
+        f'<div class="price"><div class="lv">{short.get(level, level)}</div>'
+        f'<div class="big">{rand(ten)}</div><div class="per">with a 10-pack</div>'
+        f'<div class="row"><span>Single</span><b>{rand(single)}</b></div>'
+        f'<div class="row"><span>4-pack</span><b>{rand(four)}</b></div></div>'
+        for level, (single, four, ten) in PRICES.items()
+    )
+    st.markdown(f'<div class="price-grid">{cards}</div>', unsafe_allow_html=True)
+
+    section("Special packages")
+    sp_cards = "".join(
+        f'<div class="price"><div class="lv">{name}</div>'
+        f'<div class="big">{sp.get("price") or "Quote"}</div><div class="per">{sp.get("sessions", "")}</div></div>'
+        for name, sp in SPECIALS.items()
+    )
+    st.markdown(f'<div class="sp-grid">{sp_cards}</div>', unsafe_allow_html=True)
 
     section("Your total")
     q1, q2 = st.columns(2)
@@ -535,11 +561,14 @@ def page_special():
     st.markdown('<p class="sub">For the moments that matter most.</p>', unsafe_allow_html=True)
     scols = st.columns(2)
     for i, (name, sp) in enumerate(SPECIALS.items()):
-        price = rand(sp["price"]) if sp.get("price") else "Ask for a quote"
+        price = sp.get("price") or "Ask for a quote"
         items = "".join(f'<span class="chip">{x}</span>' for x in sp["includes"])
         scols[i % 2].markdown(
             f'<div class="card"><div class="meta">{sp["for"]}</div><h4>{name}</h4>'
-            f'<div class="chips">{items}</div><span class="chip y"><b>{price}</b></span></div>',
+            f'<div class="chips">{items}</div>'
+            f'<div class="sp-price"><span class="big">{price}</span>'
+            f'<span class="chip y">{sp.get("sessions", "")}</span></div>'
+            f'<div class="per">{sp.get("detail", "")}</div></div>',
             unsafe_allow_html=True,
         )
     go("Book a lesson", P_BOOK, primary=True, key="special_book")
@@ -579,8 +608,9 @@ def page_quiz():
         rec, why = "4-lesson pack", "Enough sessions to see real progress, at a lower price per lesson."
 
     if rec in SPECIALS:
-        sp_price = SPECIALS[rec].get("price")
-        cost = f"<b>{rand(sp_price)}</b>" if sp_price else "Ask us for a quote. Pricing depends on how much prep is needed."
+        sp = SPECIALS[rec]
+        cost = (f"<b>{sp['price']}</b> for {sp.get('sessions', '')}. {sp.get('detail', '')}"
+                if sp.get("price") else "Ask us for a quote.")
     else:
         size = PACK_SIZES[rec]
         total = package_value(qa, size)
